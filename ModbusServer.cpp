@@ -303,6 +303,65 @@ class ModbusServer
         }
     }
 
+    // Must be called with mutex_ held.
+    // Pulls values from the libmodbus mapping into configured value arrays.
+    // This preserves client write effects (FC05/FC06/FC0F/FC10) across requests.
+    void SyncMappingToValues(const modbus_mapping_t *mb)
+    {
+        if (mb == nullptr)
+        {
+            return;
+        }
+
+        // Coils: address 00001-09999 → PDU index = address - 1
+        auto &coil_addrs = addresses_[0];
+        auto &coil_vals = values_[0];
+        for (std::size_t i = 0; i < coil_addrs.size() && i < coil_vals.size(); ++i)
+        {
+            int idx = coil_addrs[i] - 1;
+            if (idx >= 0 && idx < kRangeSize)
+            {
+                coil_vals[i] = static_cast<int>(mb->tab_bits[idx]);
+            }
+        }
+
+        // Discrete inputs: address 10001-19999 → PDU index = address - 10001
+        auto &di_addrs = addresses_[1];
+        auto &di_vals = values_[1];
+        for (std::size_t i = 0; i < di_addrs.size() && i < di_vals.size(); ++i)
+        {
+            int idx = di_addrs[i] - 10001;
+            if (idx >= 0 && idx < kRangeSize)
+            {
+                di_vals[i] = static_cast<int>(mb->tab_input_bits[idx]);
+            }
+        }
+
+        // Input registers: address 30001-39999 → PDU index = address - 30001
+        auto &ir_addrs = addresses_[2];
+        auto &ir_vals = values_[2];
+        for (std::size_t i = 0; i < ir_addrs.size() && i < ir_vals.size(); ++i)
+        {
+            int idx = ir_addrs[i] - 30001;
+            if (idx >= 0 && idx < kRangeSize)
+            {
+                ir_vals[i] = static_cast<int>(mb->tab_input_registers[idx]);
+            }
+        }
+
+        // Holding registers: address 40001-49999 → PDU index = address - 40001
+        auto &hr_addrs = addresses_[3];
+        auto &hr_vals = values_[3];
+        for (std::size_t i = 0; i < hr_addrs.size() && i < hr_vals.size(); ++i)
+        {
+            int idx = hr_addrs[i] - 40001;
+            if (idx >= 0 && idx < kRangeSize)
+            {
+                hr_vals[i] = static_cast<int>(mb->tab_registers[idx]);
+            }
+        }
+    }
+
     // Background server thread:
     //   - Opens a TCP socket on ip_:port_
     //   - Allocates a full modbus_mapping_t covering all address ranges
@@ -423,6 +482,13 @@ class ModbusServer
                     SyncValuesToMapping(mb_mapping);
                 }
                 modbus_reply(ctx, query, n, mb_mapping);
+
+                // Persist write-side changes from mapping into values_ so they are not
+                // overwritten by the next SyncValuesToMapping() call.
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    SyncMappingToValues(mb_mapping);
+                }
             }
 
             // Close the client socket (sets ctx->s = -1)
